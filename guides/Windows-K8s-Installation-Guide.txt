@@ -1,0 +1,212 @@
+WINDOWS INSTALLATION GUIDE
+Kubernetes + kubectl + Helm + ArgoCD
+Prerequisite: Docker Desktop already installed
+
+
+[ STEP 0 - INSTALL CHOCOLATEY ]
+
+If you don't have Chocolatey yet, open PowerShell as Administrator and run:
+
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
+
+Close and reopen PowerShell as Administrator after installing.
+
+
+[ STEP 1 - ENABLE KUBERNETES IN DOCKER DESKTOP ]
+
+1. Open Docker Desktop
+2. Go to Settings (gear icon) -> Kubernetes
+3. Check "Enable Kubernetes"
+4. Click "Apply & Restart"
+5. Wait for the green indicator (bottom-left) to show both Docker and Kubernetes running
+
+This gives you a single-node K8s cluster locally. No need for Minikube.
+
+
+[ STEP 2 - INSTALL KUBECTL ]
+
+Docker Desktop bundles its own kubectl, but it may be outdated. Install the latest:
+
+choco install kubernetes-cli -y
+
+IMPORTANT: Docker Desktop adds its own kubectl to PATH. You may need to ensure the Chocolatey version takes priority. Check which one you're using:
+
+Get-Command kubectl
+kubectl version --client
+
+If the Docker Desktop version is picked up first (path shows C:\Program Files\Docker\Docker\resources\...), reorder your PATH so Chocolatey comes first. Run in PowerShell as Administrator:
+
+$chocoPath = "C:\ProgramData\chocolatey\bin"
+$currentPath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+$dockerPath = "C:\Program Files\Docker\Docker\resources\bin"
+$newPath = ($chocoPath + ";" + ($currentPath -split ";" | Where-Object { $_ -ne $chocoPath }) -join ";")
+[Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
+
+Close and reopen PowerShell after running this. Then verify:
+
+Get-Command kubectl
+
+Should now point to C:\ProgramData\chocolatey\bin\kubectl.exe.
+
+Alternatively, just use Docker Desktop's built-in kubectl if version skew is within 1 minor version of your cluster.
+
+>> Verify cluster connection
+
+kubectl cluster-info
+kubectl get nodes
+
+You should see one node (docker-desktop) in Ready state.
+
+>> Set up kubectl autocompletion (PowerShell)
+
+kubectl completion powershell | Out-String | Invoke-Expression
+
+To make it permanent, add this line to your PowerShell profile:
+
+notepad $PROFILE
+
+Paste this line and save:
+kubectl completion powershell | Out-String | Invoke-Expression
+
+>> Useful context commands
+
+kubectl config get-contexts
+kubectl config use-context docker-desktop
+kubectl config set-context docker-desktop --namespace=default
+
+
+[ STEP 3 - INSTALL HELM ]
+
+choco install kubernetes-helm -y
+
+Verify:
+
+helm version
+
+>> Add common repos
+
+helm repo add argo https://argoproj.github.io/argo-helm
+helm repo update
+
+
+[ STEP 4 - INSTALL ARGOCD ]
+
+>> 4a. Deploy ArgoCD to your cluster
+
+kubectl create namespace argocd
+
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+Wait for all pods to be running:
+
+kubectl get pods -n argocd -w
+
+(Press Ctrl+C once all pods show Running or Completed)
+
+>> 4b. Install ArgoCD CLI
+
+choco install argocd-cli -y
+
+Verify:
+
+argocd version --client
+
+>> 4c. Access the ArgoCD UI
+
+Port-forward the ArgoCD server:
+
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+
+Now open: https://localhost:8080 in your browser (accept the self-signed cert warning).
+
+>> 4d. Get the initial admin password
+
+The default username is "admin". Get the auto-generated password:
+
+In PowerShell:
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | ForEach-Object { [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($_)) }
+
+Or using the ArgoCD CLI:
+argocd admin initial-password -n argocd
+
+>> 4e. Login via CLI
+
+argocd login localhost:8080 --insecure --username admin --password <paste-password-here>
+
+>> 4f. Change the default password (do this immediately)
+
+You must login first (step 4e) before changing the password.
+Password must be 8-32 characters.
+
+argocd account update-password --current-password <initial-password> --new-password <your-new-password>
+
+Then delete the initial secret:
+
+kubectl -n argocd delete secret argocd-initial-admin-secret
+
+
+[ STEP 5 - VERIFY EVERYTHING ]
+
+Run this checklist:
+
+kubectl version --client
+helm version
+argocd version --client
+
+kubectl get nodes
+kubectl get pods -n argocd
+
+Expected: All CLI tools installed. One K8s node (docker-desktop) running. ArgoCD pods healthy.
+
+
+[ QUICK REFERENCE - DAILY COMMANDS ]
+
+>> Start your environment
+
+1. Open Docker Desktop (starts K8s automatically)
+2. Open PowerShell
+
+>> Port-forward ArgoCD
+
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+
+>> Switch kubectl context (if you have multiple clusters)
+
+kubectl config use-context docker-desktop
+
+>> Check what's running
+
+kubectl get pods -A
+
+
+[ TROUBLESHOOTING ]
+
+>> "connection refused" on kubectl commands
+- Make sure Docker Desktop is running and Kubernetes is enabled
+- Check context: kubectl config current-context
+
+>> kubectl uses wrong version (Docker Desktop's old one)
+- Reorder your PATH: move C:\ProgramData\chocolatey\bin before Docker Desktop paths
+- Or uninstall kubectl from Chocolatey and rely on Docker Desktop's version
+
+>> ArgoCD pods stuck in Pending/CrashLoop
+- Check resources: kubectl describe pod <pod-name> -n argocd
+- Docker Desktop default memory may be too low. Go to Settings -> Resources and increase to at least 4GB RAM
+
+>> Helm chart not found
+- Run: helm repo update
+- Verify repo is added: helm repo list
+
+>> Port-forward drops after a while
+- This is normal. Just restart the port-forward command.
+- For persistent access, you can patch the service type to NodePort:
+  kubectl patch svc argocd-server -n argocd -p "{\"spec\": {\"type\": \"NodePort\"}}"
+
+
+[ USEFUL LINKS ]
+
+Kubernetes docs: https://kubernetes.io/docs/
+kubectl cheatsheet: https://kubernetes.io/docs/reference/kubectl/cheatsheet/
+Helm docs: https://helm.sh/docs/
+ArgoCD docs: https://argo-cd.readthedocs.io/en/stable/
+ArgoCD CLI: https://argo-cd.readthedocs.io/en/stable/cli_installation/

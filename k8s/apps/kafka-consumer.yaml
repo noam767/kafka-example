@@ -1,0 +1,60 @@
+##############################################################################
+# Kafka Consumer — StatefulSet (5 replicas)
+# Java 21 consumer in group "demo-consumer-group" reading from demo-topic
+# Image: kafka-consumer:1.0.0 (local Docker Desktop build)
+##############################################################################
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka-consumer
+  namespace: kafka
+  labels:
+    app: kafka-consumer
+    app.kubernetes.io/part-of: kafka
+spec:
+  serviceName: kafka-consumer
+  replicas: 5
+  selector:
+    matchLabels:
+      app: kafka-consumer
+  template:
+    metadata:
+      labels:
+        app: kafka-consumer
+    spec:
+      containers:
+        - name: consumer
+          image: kafka-consumer:1.0.0
+          imagePullPolicy: Never
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092"
+            - name: KAFKA_TOPIC
+              value: "demo-topic"
+            - name: KAFKA_GROUP_ID
+              value: "demo-consumer-group"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-consumer
+  namespace: kafka
+  labels:
+    app: kafka-consumer
+spec:
+  clusterIP: None
+  selector:
+    app: kafka-consumer
+  ports:
+    - name: placeholder
+      port: 9999
+      targetPort: 9999

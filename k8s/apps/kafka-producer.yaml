@@ -1,0 +1,60 @@
+##############################################################################
+# Kafka Producer — StatefulSet (5 replicas)
+# Java 21 producer sending to demo-topic every 2s
+# Image: kafka-producer:1.0.0 (local Docker Desktop build)
+##############################################################################
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka-producer
+  namespace: kafka
+  labels:
+    app: kafka-producer
+    app.kubernetes.io/part-of: kafka
+spec:
+  serviceName: kafka-producer
+  replicas: 5
+  selector:
+    matchLabels:
+      app: kafka-producer
+  template:
+    metadata:
+      labels:
+        app: kafka-producer
+    spec:
+      containers:
+        - name: producer
+          image: kafka-producer:1.0.0
+          imagePullPolicy: Never
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092"
+            - name: KAFKA_TOPIC
+              value: "demo-topic"
+            - name: PRODUCE_INTERVAL_MS
+              value: "2000"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-producer
+  namespace: kafka
+  labels:
+    app: kafka-producer
+spec:
+  clusterIP: None
+  selector:
+    app: kafka-producer
+  ports:
+    - name: placeholder
+      port: 9999
+      targetPort: 9999

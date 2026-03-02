@@ -1,0 +1,58 @@
+##############################################################################
+# Kafbat UI — ArgoCD Application (Helm-based)
+# Web UI for monitoring and managing the Kafka cluster
+# Helm repo: https://ui.charts.kafbat.io
+##############################################################################
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kafbat-ui
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: kafka
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kafka
+  source:
+    repoURL: https://ui.charts.kafbat.io
+    chart: kafka-ui
+    targetRevision: "1.6.0"
+    helm:
+      releaseName: kafbat-ui
+      values: |
+        yamlApplicationConfig:
+          kafka:
+            clusters:
+              - name: demo-kafka
+                bootstrapServers: demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
+          auth:
+            type: disabled
+          management:
+            health:
+              ldap:
+                enabled: false
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
