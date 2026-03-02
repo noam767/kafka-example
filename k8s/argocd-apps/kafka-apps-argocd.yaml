@@ -1,0 +1,37 @@
+##############################################################################
+# Kafka Producers & Consumers — ArgoCD Application
+# Points to k8s/apps/ directory in this repo
+# Manages: producer StatefulSet (5 pods), consumer StatefulSet (5 pods)
+##############################################################################
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kafka-apps
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: kafka
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kafka
+  source:
+    repoURL: https://github.com/noam767/kafka-example.git
+    targetRevision: HEAD
+    path: k8s/apps
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m
