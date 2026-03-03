@@ -25,18 +25,27 @@
 ## Phase 3.5: Kafbat UI
 - [x] Deploy Kafbat UI (kafka-ui) as ArgoCD Application (`kafbat-ui`)
 - [x] Configure to connect to demo-kafka bootstrap
-- [x] Verify UI accessible via port-forward (`kubectl port-forward svc/kafbat-ui-kafka-ui -n kafka 8080:80`)
+- [x] Verify UI accessible via port-forward
 
 ## Phase 4: Java Producers & Consumers
 - [x] Build producer Docker image (Java 21, kafka-clients 3.9.0)
 - [x] Build consumer Docker image (Java 21, kafka-clients 3.9.0)
 - [x] Create producer StatefulSet (5 replicas)
 - [x] Create consumer StatefulSet (5 replicas, same consumer group `demo-consumer-group`)
-- [x] Store Kafka client credentials in Vault at `secret/kafka/clients`
+- [x] Store Kafka client config in Vault at `secret/kafka/producer` and `secret/kafka/consumer`
 - [x] Create ArgoCD Application for producers/consumers (`kafka-apps`)
 - [x] Verify producers/consumers are connected and working
 
-## Phase 5: Verification
+## Phase 5: KafkaConnect + MongoDB Sink
+- [x] Deploy MongoDB standalone via Bitnami Helm ArgoCD Application (`mongodb`)
+- [x] Store MongoDB credentials in Vault at `secret/kafka/mongodb`
+- [x] Deploy KafkaConnect CR with MongoDB connector plugin (Strimzi build)
+- [x] Deploy KafkaConnector CR (`mongodb-sink-connector`) sinking `demo-topic` → MongoDB
+- [x] Create ArgoCD Application for KafkaConnect (`kafka-connect`)
+- [x] Verify data flowing: producers → Kafka → KafkaConnect → MongoDB
+- [x] Install MongoDB Compass for local GUI access
+
+## Phase 6: Verification
 - [x] All Strimzi CRDs installed (10 CRDs)
 - [x] Operator pods: 2 Running (1 leader, 1 follower)
 - [x] Kafka brokers: 3 Running
@@ -44,18 +53,32 @@
 - [x] Kafbat UI: Running and accessible
 - [x] Producers: 5 Running
 - [x] Consumers: 5 Running
-- [x] ArgoCD shows all apps Synced & Healthy (5 apps total)
+- [x] KafkaConnect: 1 Running with MongoDB sink connector
+- [x] MongoDB: 1 Running, receiving sinked data
+- [x] ArgoCD shows all 7 apps Synced & Healthy
 
-## ArgoCD Applications Summary
+## ArgoCD Applications Summary (7 total)
 | App | Type | Status |
 |-----|------|--------|
 | `strimzi-operator` | Helm (strimzi.io) | Synced & Healthy |
 | `kafka-cluster` | Git (k8s/kafka/) | Synced & Healthy |
 | `kafbat-ui` | Helm (kafbat) | Synced & Healthy |
 | `kafka-apps` | Git (k8s/apps/) | Synced & Healthy |
+| `kafka-connect` | Git (k8s/connect/) | Synced & Healthy |
+| `mongodb` | Helm (bitnami) | Synced & Healthy |
 | `vault-local` | Helm (hashicorp) | Synced & Healthy |
 
+## Vault Secrets
+| Path | Contents |
+|------|----------|
+| `secret/kafka/bootstrap` | Bootstrap servers, TLS CA cert |
+| `secret/kafka/producer` | Producer config (bootstrap, topic, interval) |
+| `secret/kafka/consumer` | Consumer config (bootstrap, topic, group) |
+| `secret/kafka/clients` | Client connection config |
+| `secret/kafka/mongodb` | MongoDB connection URI, credentials |
+
 ## Quick Access
-- ArgoCD UI: `localhost:5000`
-- Kafbat UI: `kubectl port-forward svc/kafbat-ui-kafka-ui -n kafka 8080:80` → `http://localhost:8080`
-- Vault UI: `kubectl port-forward svc/vault-local-ui -n vault 8200:8200` → `http://localhost:8200`
+- **ArgoCD UI**: `localhost:5000`
+- **Kafbat UI**: `kubectl port-forward svc/kafbat-ui-kafka-ui -n kafka 4000:80` → `http://localhost:4000`
+- **Vault UI**: `kubectl port-forward svc/vault-local-ui -n vault 8200:8200` → `http://localhost:8200`
+- **MongoDB**: `kubectl port-forward svc/mongodb -n kafka 27017:27017` → Compass: `mongodb://root:mongopass@localhost:27017/?authSource=admin`
