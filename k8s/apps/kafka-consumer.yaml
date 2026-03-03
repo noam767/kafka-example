@@ -27,13 +27,9 @@ spec:
         - name: consumer
           image: kafka-consumer:1.0.0
           imagePullPolicy: Never
-          env:
-            - name: KAFKA_BOOTSTRAP_SERVERS
-              value: "demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092"
-            - name: KAFKA_TOPIC
-              value: "demo-topic"
-            - name: KAFKA_GROUP_ID
-              value: "demo-consumer-group"
+          envFrom:
+            - secretRef:
+                name: kafka-consumer-config
           resources:
             requests:
               cpu: 50m

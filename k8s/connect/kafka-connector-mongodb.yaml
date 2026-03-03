@@ -1,0 +1,23 @@
+##############################################################################
+# KafkaConnector — MongoDB Sink
+# Sinks messages from demo-topic into MongoDB kafka_sink.demo_topic_data
+##############################################################################
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaConnector
+metadata:
+  name: mongodb-sink-connector
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: demo-connect
+spec:
+  class: com.mongodb.kafka.connect.MongoSinkConnector
+  tasksMax: 1
+  config:
+    topics: demo-topic
+    connection.uri: "mongodb://root:mongopass@mongodb.kafka.svc.cluster.local:27017"
+    database: kafka_sink
+    collection: demo_topic_data
+    key.converter: org.apache.kafka.connect.storage.StringConverter
+    value.converter: org.apache.kafka.connect.storage.StringConverter
+    post.processor.chain: "com.mongodb.kafka.connect.sink.processor.DocumentIdAdder"

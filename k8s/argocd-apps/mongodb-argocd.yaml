@@ -1,0 +1,59 @@
+##############################################################################
+# MongoDB Standalone — ArgoCD Application (Bitnami Helm)
+# Target for KafkaConnect MongoDB Sink Connector
+# Namespace: kafka (co-located for easy networking)
+##############################################################################
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mongodb
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: kafka
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kafka
+  source:
+    repoURL: https://charts.bitnami.com/bitnami
+    chart: mongodb
+    targetRevision: "16.4.1"
+    helm:
+      releaseName: mongodb
+      values: |
+        architecture: standalone
+        image:
+          registry: docker.io
+          repository: bitnami/mongodb
+          tag: "latest"
+        auth:
+          enabled: true
+          rootUser: root
+          rootPassword: mongopass
+        persistence:
+          enabled: true
+          size: 2Gi
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

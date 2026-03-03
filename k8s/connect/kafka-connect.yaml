@@ -1,0 +1,47 @@
+##############################################################################
+# KafkaConnect — Strimzi 0.50.1, Kafka 4.0.0
+# Builds custom image with MongoDB Kafka Connector (sink)
+# Uses ttl.sh ephemeral registry (no auth needed for local dev)
+##############################################################################
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaConnect
+metadata:
+  name: demo-connect
+  namespace: kafka
+  annotations:
+    strimzi.io/use-connector-resources: "true"
+spec:
+  version: "4.0.0"
+  replicas: 1
+  bootstrapServers: demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
+  config:
+    group.id: demo-connect-group
+    config.storage.topic: demo-connect-configs
+    config.storage.replication.factor: 3
+    offset.storage.topic: demo-connect-offsets
+    offset.storage.replication.factor: 3
+    status.storage.topic: demo-connect-status
+    status.storage.replication.factor: 3
+    key.converter: org.apache.kafka.connect.json.JsonConverter
+    value.converter: org.apache.kafka.connect.json.JsonConverter
+    key.converter.schemas.enable: false
+    value.converter.schemas.enable: false
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  build:
+    output:
+      type: docker
+      image: ttl.sh/demo-connect-mongodb:24h
+    plugins:
+      - name: mongodb-connector
+        artifacts:
+          - type: maven
+            group: org.mongodb.kafka
+            artifact: mongo-kafka-connect
+            version: 1.13.1
