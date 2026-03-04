@@ -138,7 +138,7 @@ spec:
     spec:
       containers:
         - name: watcher
-          image: docker.io/bitnami/zookeeper:latest
+          image: docker.io/bitnamilegacy/zookeeper:3.9.3
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "/scripts/watcher.sh"]
           envFrom:

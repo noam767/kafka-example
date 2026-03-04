@@ -29,8 +29,8 @@ spec:
         replicaCount: 3
         image:
           registry: docker.io
-          repository: bitnami/zookeeper
-          tag: "latest"
+          repository: bitnamilegacy/zookeeper
+          tag: "3.9.3"
         auth:
           client:
             enabled: true

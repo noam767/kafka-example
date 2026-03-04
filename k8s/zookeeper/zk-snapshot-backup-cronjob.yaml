@@ -173,7 +173,7 @@ spec:
           restartPolicy: OnFailure
           initContainers:
             - name: install-mongosh
-              image: docker.io/bitnami/zookeeper:latest
+              image: docker.io/bitnamilegacy/zookeeper:3.9.3
               imagePullPolicy: IfNotPresent
               command:
                 - /bin/bash
@@ -190,7 +190,7 @@ spec:
                   mountPath: /shared
           containers:
             - name: backup
-              image: docker.io/bitnami/zookeeper:latest
+              image: docker.io/bitnamilegacy/zookeeper:3.9.3
               imagePullPolicy: IfNotPresent
               command: ["/bin/bash", "/scripts/backup.sh"]
               env:
