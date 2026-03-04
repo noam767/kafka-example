@@ -1,0 +1,64 @@
+##############################################################################
+# ZooNavigator — Web UI for ZooKeeper
+# Port-forward: kubectl port-forward svc/zoonavigator -n kafka 7000:7000
+##############################################################################
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zoonavigator
+  namespace: kafka
+  labels:
+    app.kubernetes.io/name: zoonavigator
+    app.kubernetes.io/part-of: kafka
+    app.kubernetes.io/component: zookeeper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zoonavigator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zoonavigator
+        app.kubernetes.io/part-of: kafka
+        app.kubernetes.io/component: zookeeper
+    spec:
+      containers:
+        - name: zoonavigator
+          image: elkozmon/zoonavigator:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 9000
+          env:
+            - name: HTTP_PORT
+              value: "9000"
+            - name: AUTO_CONNECT_CONNECTION_STRING
+              value: "zookeeper-0.zookeeper-headless.kafka.svc.cluster.local:2181,zookeeper-1.zookeeper-headless.kafka.svc.cluster.local:2181,zookeeper-2.zookeeper-headless.kafka.svc.cluster.local:2181"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 384Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zoonavigator
+  namespace: kafka
+  labels:
+    app.kubernetes.io/name: zoonavigator
+    app.kubernetes.io/part-of: kafka
+    app.kubernetes.io/component: zookeeper
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: zoonavigator
+  ports:
+    - name: http
+      port: 7000
+      targetPort: 9000
+      protocol: TCP
