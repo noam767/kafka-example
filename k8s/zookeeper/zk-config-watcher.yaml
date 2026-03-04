@@ -14,90 +14,81 @@ metadata:
     app.kubernetes.io/part-of: kafka
     app.kubernetes.io/component: zookeeper
 data:
-  watcher.sh: |
-    #!/bin/bash
-    set -e
+  init-znodes.txt: |
+    create /kafka-platform init
+    create /kafka-platform/config init
+    create /kafka-platform/config/producer bootstrap=demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092,topic=demo-topic,interval_ms=2000
+    create /kafka-platform/config/consumer bootstrap=demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092,topic=demo-topic,group_id=demo-consumer-group
+    create /kafka-platform/config/connect bootstrap=demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092,database=kafka_sink,collection=demo_topic_data
+    quit
+  watcher.py: |
+    #!/usr/bin/env python3
+    """ZooKeeper Config Watcher — uses kazoo to set persistent watches on config znodes."""
+    import os, sys, time, json, signal
+    from kazoo.client import KazooClient
+    from kazoo.recipe.watchers import ChildrenWatch, DataWatch
 
-    ZK_HOST="${ZK_CONNECT:-zookeeper.kafka.svc.cluster.local:2181}"
-    ZK_CLI="/opt/bitnami/zookeeper/bin/zkCli.sh"
+    ZK_HOSTS = os.environ.get("ZK_CONNECT", "zookeeper.kafka.svc.cluster.local:2181")
+    CONFIG_ROOT = "/kafka-platform/config"
+    POLL_INTERVAL = 15
 
-    echo "[watcher] Connecting to ZooKeeper: ${ZK_HOST}"
-    echo "[watcher] Waiting for ZooKeeper to be ready..."
-    until $ZK_CLI -server "$ZK_HOST" ls / 2>/dev/null | grep -q "\["; do
-      echo "[watcher] ZooKeeper not ready, retrying in 5s..."
-      sleep 5
-    done
-    echo "[watcher] ZooKeeper is ready."
+    def main():
+        print(f"[watcher] Connecting to ZooKeeper: {ZK_HOSTS}", flush=True)
+        zk = KazooClient(hosts=ZK_HOSTS)
+        zk.start(timeout=30)
+        print("[watcher] Connected.", flush=True)
 
-    # Build producer config JSON (no special chars that confuse zkCli)
-    PRODUCER_DATA="bootstrap=${KAFKA_BOOTSTRAP_SERVERS},topic=${KAFKA_TOPIC},interval_ms=${PRODUCE_INTERVAL_MS}"
-    CONSUMER_DATA="bootstrap=${KAFKA_BOOTSTRAP_SERVERS},topic=${KAFKA_TOPIC},group_id=${KAFKA_GROUP_ID}"
-    CONNECT_DATA="bootstrap=${KAFKA_BOOTSTRAP_SERVERS},database=kafka_sink,collection=demo_topic_data"
+        # Track previous values for change detection
+        prev = {}
 
-    # Initialize config znodes — create hierarchy then set data
-    echo "[watcher] Initializing config znodes..."
-    $ZK_CLI -server "$ZK_HOST" create /kafka-platform "" 2>/dev/null || true
-    $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config "" 2>/dev/null || true
-    $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config/producer "$PRODUCER_DATA" 2>/dev/null || true
-    $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config/consumer "$CONSUMER_DATA" 2>/dev/null || true
-    $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config/connect "$CONNECT_DATA" 2>/dev/null || true
-    echo "[watcher] Znodes initialized (or already exist)."
+        def make_data_watch(path):
+            """Create a DataWatch callback for a given znode path."""
+            def watch_func(data, stat, event):
+                name = path.split("/")[-1]
+                value = data.decode("utf-8") if data else ""
+                ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                if name in prev and prev[name] != value:
+                    print(f"[watcher] [{ts}] >>> CHANGE DETECTED: {name} <<<", flush=True)
+                    print(f"[watcher]   OLD: {prev[name]}", flush=True)
+                    print(f"[watcher]   NEW: {value}", flush=True)
+                else:
+                    print(f"[watcher] [{ts}] {name} => {value}", flush=True)
+                prev[name] = value
+            return watch_func
 
-    # Continuous watch loop — polls znodes and detects changes
-    echo "[watcher] Starting config watch loop on /kafka-platform/config..."
+        def children_watch(children):
+            """Watch for new config znodes under /kafka-platform/config."""
+            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            print(f"[watcher] [{ts}] Config znodes: {children}", flush=True)
+            for child in children:
+                path = f"{CONFIG_ROOT}/{child}"
+                DataWatch(zk, path, func=make_data_watch(path))
 
-    PREV_PRODUCER=""
-    PREV_CONSUMER=""
-    PREV_CONNECT=""
+        # Set up children watch (auto-registers data watches for each child)
+        print(f"[watcher] Setting watches on {CONFIG_ROOT}...", flush=True)
+        ChildrenWatch(zk, CONFIG_ROOT, func=children_watch)
 
-    while true; do
-      echo "============================================="
-      echo "[watcher] $(date -u '+%Y-%m-%dT%H:%M:%SZ') Polling config znodes..."
+        # Keep alive
+        print("[watcher] Watching for config changes... (Ctrl+C to stop)", flush=True)
+        signal.signal(signal.SIGTERM, lambda *_: (zk.stop(), sys.exit(0)))
+        while True:
+            time.sleep(POLL_INTERVAL)
 
-      # Read current values
-      CUR_PRODUCER=$($ZK_CLI -server "$ZK_HOST" get /kafka-platform/config/producer 2>/dev/null | grep -v "^$\|^WATCHER\|^WatchedEvent\|^cZxid\|^ctime\|^mZxid\|^mtime\|^pZxid\|^cversion\|^dataVersion\|^aclVersion\|^ephemeralOwner\|^dataLength\|^numChildren\|^Connecting\|^Welcome" | head -1) || true
-      CUR_CONSUMER=$($ZK_CLI -server "$ZK_HOST" get /kafka-platform/config/consumer 2>/dev/null | grep -v "^$\|^WATCHER\|^WatchedEvent\|^cZxid\|^ctime\|^mZxid\|^mtime\|^pZxid\|^cversion\|^dataVersion\|^aclVersion\|^ephemeralOwner\|^dataLength\|^numChildren\|^Connecting\|^Welcome" | head -1) || true
-      CUR_CONNECT=$($ZK_CLI -server "$ZK_HOST" get /kafka-platform/config/connect 2>/dev/null | grep -v "^$\|^WATCHER\|^WatchedEvent\|^cZxid\|^ctime\|^mZxid\|^mtime\|^pZxid\|^cversion\|^dataVersion\|^aclVersion\|^ephemeralOwner\|^dataLength\|^numChildren\|^Connecting\|^Welcome" | head -1) || true
-
-      echo "[watcher] producer => $CUR_PRODUCER"
-      echo "[watcher] consumer => $CUR_CONSUMER"
-      echo "[watcher] connect  => $CUR_CONNECT"
-
-      # Detect changes
-      if [ -n "$PREV_PRODUCER" ] && [ "$CUR_PRODUCER" != "$PREV_PRODUCER" ]; then
-        echo "[watcher] >>> CHANGE DETECTED: producer config updated <<<"
-        echo "[watcher]   OLD: $PREV_PRODUCER"
-        echo "[watcher]   NEW: $CUR_PRODUCER"
-      fi
-      if [ -n "$PREV_CONSUMER" ] && [ "$CUR_CONSUMER" != "$PREV_CONSUMER" ]; then
-        echo "[watcher] >>> CHANGE DETECTED: consumer config updated <<<"
-        echo "[watcher]   OLD: $PREV_CONSUMER"
-        echo "[watcher]   NEW: $CUR_CONSUMER"
-      fi
-      if [ -n "$PREV_CONNECT" ] && [ "$CUR_CONNECT" != "$PREV_CONNECT" ]; then
-        echo "[watcher] >>> CHANGE DETECTED: connect config updated <<<"
-        echo "[watcher]   OLD: $PREV_CONNECT"
-        echo "[watcher]   NEW: $CUR_CONNECT"
-      fi
-
-      PREV_PRODUCER="$CUR_PRODUCER"
-      PREV_CONSUMER="$CUR_CONSUMER"
-      PREV_CONNECT="$CUR_CONNECT"
-
-      echo "[watcher] Sleeping 15s before next poll..."
-      sleep 15
-    done
+    if __name__ == "__main__":
+        main()
   update-config.sh: |
     #!/bin/bash
-    # Utility script: update a config znode to trigger watcher detection
-    # Usage: update-config.sh <producer|consumer|connect> '<value>'
+    # Utility: update a config znode to trigger watcher
+    # Usage: kubectl exec <watcher-pod> -- /scripts/update-config.sh producer 'new-value'
     ZK_HOST="${ZK_CONNECT:-zookeeper.kafka.svc.cluster.local:2181}"
-    ZK_CLI="/opt/bitnami/zookeeper/bin/zkCli.sh"
-    ZNODE="/kafka-platform/config/$1"
-    VALUE="$2"
-    echo "[update] Setting ${ZNODE} = ${VALUE}"
-    $ZK_CLI -server "$ZK_HOST" set "$ZNODE" "$VALUE"
-    echo "[update] Done. Watcher will detect change on next poll."
+    python3 -c "
+    from kazoo.client import KazooClient
+    zk = KazooClient(hosts='${ZK_HOST}')
+    zk.start()
+    zk.set('/kafka-platform/config/$1', b'$2')
+    zk.stop()
+    print('[update] Set /kafka-platform/config/$1 = $2')
+    "
 ---
 apiVersion: v1
 kind: Secret
@@ -136,23 +127,43 @@ spec:
         app.kubernetes.io/part-of: kafka
         app.kubernetes.io/component: zookeeper
     spec:
-      containers:
-        - name: watcher
+      initContainers:
+        - name: init-znodes
           image: docker.io/bitnamilegacy/zookeeper:3.9.3
           imagePullPolicy: IfNotPresent
-          command: ["/bin/bash", "/scripts/watcher.sh"]
+          command:
+            - /bin/bash
+            - -c
+            - |
+              ZK_HOST="$ZK_CONNECT"
+              ZK_CLI="/opt/bitnami/zookeeper/bin/zkCli.sh"
+              echo "[init] Waiting for ZooKeeper..."
+              until $ZK_CLI -server "$ZK_HOST" ls / 2>/dev/null | grep -q "\["; do
+                sleep 3
+              done
+              echo "[init] Creating config znodes..."
+              # Create znodes one at a time, ignore errors if they exist
+              $ZK_CLI -server "$ZK_HOST" create /kafka-platform init 2>/dev/null || true
+              $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config init 2>/dev/null || true
+              $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config/producer "bootstrap=demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092,topic=demo-topic,interval_ms=2000" 2>/dev/null || true
+              $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config/consumer "bootstrap=demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092,topic=demo-topic,group_id=demo-consumer-group" 2>/dev/null || true
+              $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config/connect "bootstrap=demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092,database=kafka_sink,collection=demo_topic_data" 2>/dev/null || true
+              echo "[init] Znodes ready."
           envFrom:
             - secretRef:
                 name: zk-config-watcher-secret
-          env:
-            - name: KAFKA_BOOTSTRAP_SERVERS
-              value: "demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092"
-            - name: KAFKA_TOPIC
-              value: "demo-topic"
-            - name: PRODUCE_INTERVAL_MS
-              value: "2000"
-            - name: KAFKA_GROUP_ID
-              value: "demo-consumer-group"
+      containers:
+        - name: watcher
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              pip install --quiet kazoo && python3 /scripts/watcher.py
+          envFrom:
+            - secretRef:
+                name: zk-config-watcher-secret
           resources:
             requests:
               cpu: 50m
