@@ -19,85 +19,85 @@ data:
     set -e
 
     ZK_HOST="${ZK_CONNECT:-zookeeper.kafka.svc.cluster.local:2181}"
-    ZK_AUTH="${ZK_CLIENT_USER}:${ZK_CLIENT_PASSWORD}"
     ZK_CLI="/opt/bitnami/zookeeper/bin/zkCli.sh"
 
     echo "[watcher] Connecting to ZooKeeper: ${ZK_HOST}"
     echo "[watcher] Waiting for ZooKeeper to be ready..."
-    until $ZK_CLI -server "$ZK_HOST" <<< "ls /" 2>/dev/null | grep -q "\["; do
+    until $ZK_CLI -server "$ZK_HOST" ls / 2>/dev/null | grep -q "\["; do
       echo "[watcher] ZooKeeper not ready, retrying in 5s..."
       sleep 5
     done
     echo "[watcher] ZooKeeper is ready."
 
-    # Initialize config znodes if they don't exist
-    echo "[watcher] Initializing config znodes..."
+    # Build producer config JSON (no special chars that confuse zkCli)
+    PRODUCER_DATA="bootstrap=${KAFKA_BOOTSTRAP_SERVERS},topic=${KAFKA_TOPIC},interval_ms=${PRODUCE_INTERVAL_MS}"
+    CONSUMER_DATA="bootstrap=${KAFKA_BOOTSTRAP_SERVERS},topic=${KAFKA_TOPIC},group_id=${KAFKA_GROUP_ID}"
+    CONNECT_DATA="bootstrap=${KAFKA_BOOTSTRAP_SERVERS},database=kafka_sink,collection=demo_topic_data"
 
-    $ZK_CLI -server "$ZK_HOST" <<EOF
-    addauth digest ${ZK_AUTH}
-    create /kafka-platform ""
-    create /kafka-platform/config ""
-    create /kafka-platform/config/producer "{\"bootstrap_servers\":\"${KAFKA_BOOTSTRAP_SERVERS}\",\"topic\":\"${KAFKA_TOPIC}\",\"interval_ms\":\"${PRODUCE_INTERVAL_MS}\"}"
-    create /kafka-platform/config/consumer "{\"bootstrap_servers\":\"${KAFKA_BOOTSTRAP_SERVERS}\",\"topic\":\"${KAFKA_TOPIC}\",\"group_id\":\"${KAFKA_GROUP_ID}\"}"
-    create /kafka-platform/config/connect "{\"bootstrap_servers\":\"${KAFKA_BOOTSTRAP_SERVERS}\",\"mongodb_uri\":\"mongodb://root:mongopass@mongodb.kafka.svc.cluster.local:27017\",\"database\":\"kafka_sink\",\"collection\":\"demo_topic_data\"}"
-    quit
-    EOF
+    # Initialize config znodes — create hierarchy then set data
+    echo "[watcher] Initializing config znodes..."
+    $ZK_CLI -server "$ZK_HOST" create /kafka-platform "" 2>/dev/null || true
+    $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config "" 2>/dev/null || true
+    $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config/producer "$PRODUCER_DATA" 2>/dev/null || true
+    $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config/consumer "$CONSUMER_DATA" 2>/dev/null || true
+    $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config/connect "$CONNECT_DATA" 2>/dev/null || true
     echo "[watcher] Znodes initialized (or already exist)."
 
-    # Continuous watch loop — re-registers watches on each change
-    echo "[watcher] Starting watch loop on /kafka-platform/config..."
+    # Continuous watch loop — polls znodes and detects changes
+    echo "[watcher] Starting config watch loop on /kafka-platform/config..."
+
+    PREV_PRODUCER=""
+    PREV_CONSUMER=""
+    PREV_CONNECT=""
 
     while true; do
       echo "============================================="
-      echo "[watcher] $(date -u '+%Y-%m-%dT%H:%M:%SZ') Registering watches..."
+      echo "[watcher] $(date -u '+%Y-%m-%dT%H:%M:%SZ') Polling config znodes..."
 
-      # Get current values and set watches (-w flag)
-      OUTPUT=$($ZK_CLI -server "$ZK_HOST" 2>&1 <<EOF
-    addauth digest ${ZK_AUTH}
-    get -w /kafka-platform/config/producer
-    get -w /kafka-platform/config/consumer
-    get -w /kafka-platform/config/connect
-    get -w /kafka-platform/config
-    stat -w /kafka-platform/config/producer
-    stat -w /kafka-platform/config/consumer
-    stat -w /kafka-platform/config/connect
-    EOF
-      )
+      # Read current values
+      CUR_PRODUCER=$($ZK_CLI -server "$ZK_HOST" get /kafka-platform/config/producer 2>/dev/null | grep -v "^$\|^WATCHER\|^WatchedEvent\|^cZxid\|^ctime\|^mZxid\|^mtime\|^pZxid\|^cversion\|^dataVersion\|^aclVersion\|^ephemeralOwner\|^dataLength\|^numChildren\|^Connecting\|^Welcome" | head -1) || true
+      CUR_CONSUMER=$($ZK_CLI -server "$ZK_HOST" get /kafka-platform/config/consumer 2>/dev/null | grep -v "^$\|^WATCHER\|^WatchedEvent\|^cZxid\|^ctime\|^mZxid\|^mtime\|^pZxid\|^cversion\|^dataVersion\|^aclVersion\|^ephemeralOwner\|^dataLength\|^numChildren\|^Connecting\|^Welcome" | head -1) || true
+      CUR_CONNECT=$($ZK_CLI -server "$ZK_HOST" get /kafka-platform/config/connect 2>/dev/null | grep -v "^$\|^WATCHER\|^WatchedEvent\|^cZxid\|^ctime\|^mZxid\|^mtime\|^pZxid\|^cversion\|^dataVersion\|^aclVersion\|^ephemeralOwner\|^dataLength\|^numChildren\|^Connecting\|^Welcome" | head -1) || true
 
-      # Log current config state
-      echo "[watcher] Current producer config:"
-      echo "$OUTPUT" | grep -A1 "config/producer" | head -5 || true
-      echo "[watcher] Current consumer config:"
-      echo "$OUTPUT" | grep -A1 "config/consumer" | head -5 || true
-      echo "[watcher] Current connect config:"
-      echo "$OUTPUT" | grep -A1 "config/connect" | head -5 || true
+      echo "[watcher] producer => $CUR_PRODUCER"
+      echo "[watcher] consumer => $CUR_CONSUMER"
+      echo "[watcher] connect  => $CUR_CONNECT"
 
-      # Check for WatchedEvent in output (triggered watch)
-      if echo "$OUTPUT" | grep -q "WatchedEvent"; then
-        echo "[watcher] >>> WATCH TRIGGERED! Config change detected <<<"
-        echo "$OUTPUT" | grep "WatchedEvent"
+      # Detect changes
+      if [ -n "$PREV_PRODUCER" ] && [ "$CUR_PRODUCER" != "$PREV_PRODUCER" ]; then
+        echo "[watcher] >>> CHANGE DETECTED: producer config updated <<<"
+        echo "[watcher]   OLD: $PREV_PRODUCER"
+        echo "[watcher]   NEW: $CUR_PRODUCER"
+      fi
+      if [ -n "$PREV_CONSUMER" ] && [ "$CUR_CONSUMER" != "$PREV_CONSUMER" ]; then
+        echo "[watcher] >>> CHANGE DETECTED: consumer config updated <<<"
+        echo "[watcher]   OLD: $PREV_CONSUMER"
+        echo "[watcher]   NEW: $CUR_CONSUMER"
+      fi
+      if [ -n "$PREV_CONNECT" ] && [ "$CUR_CONNECT" != "$PREV_CONNECT" ]; then
+        echo "[watcher] >>> CHANGE DETECTED: connect config updated <<<"
+        echo "[watcher]   OLD: $PREV_CONNECT"
+        echo "[watcher]   NEW: $CUR_CONNECT"
       fi
 
-      echo "[watcher] Sleeping 30s before re-registering watches..."
-      sleep 30
+      PREV_PRODUCER="$CUR_PRODUCER"
+      PREV_CONSUMER="$CUR_CONSUMER"
+      PREV_CONNECT="$CUR_CONNECT"
+
+      echo "[watcher] Sleeping 15s before next poll..."
+      sleep 15
     done
   update-config.sh: |
     #!/bin/bash
-    # Utility script: update a config znode to trigger watchers
-    # Usage: update-config.sh <producer|consumer|connect> '<json-value>'
+    # Utility script: update a config znode to trigger watcher detection
+    # Usage: update-config.sh <producer|consumer|connect> '<value>'
     ZK_HOST="${ZK_CONNECT:-zookeeper.kafka.svc.cluster.local:2181}"
-    ZK_AUTH="${ZK_CLIENT_USER}:${ZK_CLIENT_PASSWORD}"
     ZK_CLI="/opt/bitnami/zookeeper/bin/zkCli.sh"
     ZNODE="/kafka-platform/config/$1"
     VALUE="$2"
-
     echo "[update] Setting ${ZNODE} = ${VALUE}"
-    $ZK_CLI -server "$ZK_HOST" <<EOF
-    addauth digest ${ZK_AUTH}
-    set ${ZNODE} "${VALUE}"
-    quit
-    EOF
-    echo "[update] Done. Watchers should fire."
+    $ZK_CLI -server "$ZK_HOST" set "$ZNODE" "$VALUE"
+    echo "[update] Done. Watcher will detect change on next poll."
 ---
 apiVersion: v1
 kind: Secret
