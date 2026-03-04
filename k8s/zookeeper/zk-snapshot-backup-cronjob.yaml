@@ -1,0 +1,220 @@
+##############################################################################
+# ZooKeeper Snapshot Backup CronJob
+# Runs every 6 hours — exports ZK snapshot data and stores it in MongoDB
+# Target: mongodb.kafka.svc.cluster.local / kafka_sink.zk_snapshots
+##############################################################################
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zk-backup-script
+  namespace: kafka
+  labels:
+    app.kubernetes.io/name: zk-snapshot-backup
+    app.kubernetes.io/part-of: kafka
+    app.kubernetes.io/component: zookeeper
+data:
+  backup.sh: |
+    #!/bin/bash
+    set -e
+
+    ZK_HOST="${ZK_CONNECT:-zookeeper.kafka.svc.cluster.local:2181}"
+    ZK_AUTH="${ZK_CLIENT_USER}:${ZK_CLIENT_PASSWORD}"
+    MONGO_URI="${MONGO_CONNECTION_URI}"
+    MONGO_DB="kafka_sink"
+    MONGO_COLLECTION="zk_snapshots"
+    TIMESTAMP=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    BACKUP_ID="zk-backup-$(date -u '+%Y%m%d-%H%M%S')"
+
+    echo "[backup] Starting ZooKeeper snapshot backup: ${BACKUP_ID}"
+    echo "[backup] ZK Host: ${ZK_HOST}"
+    echo "[backup] MongoDB: ${MONGO_DB}.${MONGO_COLLECTION}"
+    echo "[backup] Timestamp: ${TIMESTAMP}"
+
+    # Wait for ZK to be ready
+    ZK_CLI="/opt/bitnami/zookeeper/bin/zkCli.sh"
+    until $ZK_CLI -server "$ZK_HOST" <<< "ls /" 2>/dev/null | grep -q "\["; do
+      echo "[backup] Waiting for ZooKeeper..."
+      sleep 3
+    done
+
+    # Export all znodes recursively
+    echo "[backup] Dumping ZooKeeper znode tree..."
+
+    DUMP_FILE="/tmp/zk-snapshot-${BACKUP_ID}.json"
+
+    # Get full znode tree
+    TREE=$($ZK_CLI -server "$ZK_HOST" 2>/dev/null <<EOF
+    addauth digest ${ZK_AUTH}
+    ls -R /
+    EOF
+    )
+
+    # Extract znode paths (filter noise)
+    ZNODES=$(echo "$TREE" | grep "^/" | grep -v "^\[" | sort -u)
+
+    echo "[backup] Found znodes, extracting data..."
+
+    # Build JSON array of znode snapshots
+    echo "[" > "$DUMP_FILE"
+    FIRST=true
+
+    for ZNODE in $ZNODES; do
+      # Skip system znodes
+      case "$ZNODE" in
+        /zookeeper*) continue ;;
+      esac
+
+      DATA=$($ZK_CLI -server "$ZK_HOST" 2>/dev/null <<EOF
+    addauth digest ${ZK_AUTH}
+    get ${ZNODE}
+    EOF
+      )
+
+      # Extract the data line (skip zkCli noise)
+      VALUE=$(echo "$DATA" | grep -v "^Connecting\|^WATCHER\|^WatchedEvent\|^$\|^addauth\|^get\|^quit\|^cZxid\|^ctime\|^mZxid\|^mtime\|^pZxid\|^cversion\|^dataVersion\|^aclVersion\|^ephemeralOwner\|^dataLength\|^numChildren" | head -1 | tr -d '\r')
+
+      # Escape for JSON
+      VALUE=$(echo "$VALUE" | sed 's/\\/\\\\/g; s/"/\\"/g')
+
+      if [ "$FIRST" = true ]; then
+        FIRST=false
+      else
+        echo "," >> "$DUMP_FILE"
+      fi
+
+      echo "  {\"path\": \"${ZNODE}\", \"data\": \"${VALUE}\"}" >> "$DUMP_FILE"
+    done
+
+    echo "]" >> "$DUMP_FILE"
+
+    echo "[backup] Snapshot file created: $(wc -c < "$DUMP_FILE") bytes"
+
+    # Read the snapshot content
+    SNAPSHOT_DATA=$(cat "$DUMP_FILE" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g')
+
+    # Insert into MongoDB using mongosh
+    echo "[backup] Storing snapshot in MongoDB..."
+
+    mongosh "${MONGO_URI}/${MONGO_DB}?authSource=admin" --quiet --eval "
+      db.${MONGO_COLLECTION}.insertOne({
+        backup_id: '${BACKUP_ID}',
+        timestamp: new Date('${TIMESTAMP}'),
+        znode_count: $(echo "$ZNODES" | wc -l),
+        snapshot_data: $(cat "$DUMP_FILE"),
+        metadata: {
+          zk_host: '${ZK_HOST}',
+          created_by: 'zk-snapshot-backup-cronjob',
+          version: '1.0'
+        }
+      });
+      print('[backup] Snapshot stored successfully.');
+      print('[backup] Total backups: ' + db.${MONGO_COLLECTION}.countDocuments({}));
+    "
+
+    # Retention: keep only last 20 backups
+    mongosh "${MONGO_URI}/${MONGO_DB}?authSource=admin" --quiet --eval "
+      const count = db.${MONGO_COLLECTION}.countDocuments({});
+      if (count > 20) {
+        const toDelete = db.${MONGO_COLLECTION}.find().sort({timestamp: 1}).limit(count - 20).toArray();
+        const ids = toDelete.map(d => d._id);
+        db.${MONGO_COLLECTION}.deleteMany({_id: {\$in: ids}});
+        print('[backup] Pruned ' + ids.length + ' old backups. Remaining: 20');
+      } else {
+        print('[backup] No pruning needed. Total backups: ' + count);
+      }
+    "
+
+    echo "[backup] Backup complete: ${BACKUP_ID}"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: zk-backup-secret
+  namespace: kafka
+  labels:
+    app.kubernetes.io/name: zk-snapshot-backup
+    app.kubernetes.io/part-of: kafka
+    app.kubernetes.io/component: zookeeper
+  annotations:
+    vault-path: secret/kafka/zookeeper
+    vault-path-mongo: secret/kafka/mongodb
+stringData:
+  ZK_CLIENT_USER: "zkuser"
+  ZK_CLIENT_PASSWORD: "zkpass123"
+  ZK_CONNECT: "zookeeper-0.zookeeper-headless.kafka.svc.cluster.local:2181,zookeeper-1.zookeeper-headless.kafka.svc.cluster.local:2181,zookeeper-2.zookeeper-headless.kafka.svc.cluster.local:2181"
+  MONGO_CONNECTION_URI: "mongodb://root:mongopass@mongodb.kafka.svc.cluster.local:27017"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: zk-snapshot-backup
+  namespace: kafka
+  labels:
+    app.kubernetes.io/name: zk-snapshot-backup
+    app.kubernetes.io/part-of: kafka
+    app.kubernetes.io/component: zookeeper
+spec:
+  schedule: "0 */6 * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: zk-snapshot-backup
+            app.kubernetes.io/part-of: kafka
+            app.kubernetes.io/component: zookeeper
+        spec:
+          restartPolicy: OnFailure
+          initContainers:
+            - name: install-mongosh
+              image: docker.io/bitnami/zookeeper:latest
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  # Download mongosh binary
+                  apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1
+                  curl -fsSL https://downloads.mongodb.com/compass/mongosh-2.3.8-linux-x64.tgz \
+                    -o /tmp/mongosh.tgz
+                  tar xzf /tmp/mongosh.tgz -C /shared --strip-components=1
+                  echo "[init] mongosh installed to /shared/bin/mongosh"
+              volumeMounts:
+                - name: shared-bin
+                  mountPath: /shared
+          containers:
+            - name: backup
+              image: docker.io/bitnami/zookeeper:latest
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/bash", "/scripts/backup.sh"]
+              env:
+                - name: PATH
+                  value: "/shared/bin:/opt/bitnami/zookeeper/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+              envFrom:
+                - secretRef:
+                    name: zk-backup-secret
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                - name: shared-bin
+                  mountPath: /shared
+          volumes:
+            - name: scripts
+              configMap:
+                name: zk-backup-script
+                defaultMode: 0755
+            - name: shared-bin
+              emptyDir: {}

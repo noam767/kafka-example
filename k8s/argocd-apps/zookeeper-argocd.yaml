@@ -1,0 +1,68 @@
+##############################################################################
+# ZooKeeper Ensemble — ArgoCD Application (Bitnami Helm)
+# 3-node ZooKeeper cluster for config watches & coordination
+# Namespace: kafka (co-located with Kafka platform)
+##############################################################################
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: zookeeper
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: kafka
+    app.kubernetes.io/component: zookeeper
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kafka
+  source:
+    repoURL: https://charts.bitnami.com/bitnami
+    chart: zookeeper
+    targetRevision: "13.8.7"
+    helm:
+      releaseName: zookeeper
+      values: |
+        replicaCount: 3
+        image:
+          registry: docker.io
+          repository: bitnami/zookeeper
+          tag: "latest"
+        auth:
+          client:
+            enabled: true
+            clientUser: zkuser
+            clientPassword: zkpass123
+            serverUsers: zkadmin
+            serverPasswords: zkadminpass123
+        persistence:
+          enabled: true
+          size: 1Gi
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        autopurge:
+          snapRetainCount: 5
+          purgeInterval: 24
+        metrics:
+          enabled: false
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 5m

@@ -1,0 +1,170 @@
+##############################################################################
+# ZooKeeper Config Watcher — Watches producer/consumer config znodes
+# Uses ZooKeeper watch (Observer) mechanism to detect config changes
+# Initializes znodes with current producer/consumer config, then watches
+##############################################################################
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zk-config-watcher-script
+  namespace: kafka
+  labels:
+    app.kubernetes.io/name: zk-config-watcher
+    app.kubernetes.io/part-of: kafka
+    app.kubernetes.io/component: zookeeper
+data:
+  watcher.sh: |
+    #!/bin/bash
+    set -e
+
+    ZK_HOST="${ZK_CONNECT:-zookeeper.kafka.svc.cluster.local:2181}"
+    ZK_AUTH="${ZK_CLIENT_USER}:${ZK_CLIENT_PASSWORD}"
+    ZK_CLI="/opt/bitnami/zookeeper/bin/zkCli.sh"
+
+    echo "[watcher] Connecting to ZooKeeper: ${ZK_HOST}"
+    echo "[watcher] Waiting for ZooKeeper to be ready..."
+    until $ZK_CLI -server "$ZK_HOST" <<< "ls /" 2>/dev/null | grep -q "\["; do
+      echo "[watcher] ZooKeeper not ready, retrying in 5s..."
+      sleep 5
+    done
+    echo "[watcher] ZooKeeper is ready."
+
+    # Initialize config znodes if they don't exist
+    echo "[watcher] Initializing config znodes..."
+
+    $ZK_CLI -server "$ZK_HOST" <<EOF
+    addauth digest ${ZK_AUTH}
+    create /kafka-platform ""
+    create /kafka-platform/config ""
+    create /kafka-platform/config/producer "{\"bootstrap_servers\":\"${KAFKA_BOOTSTRAP_SERVERS}\",\"topic\":\"${KAFKA_TOPIC}\",\"interval_ms\":\"${PRODUCE_INTERVAL_MS}\"}"
+    create /kafka-platform/config/consumer "{\"bootstrap_servers\":\"${KAFKA_BOOTSTRAP_SERVERS}\",\"topic\":\"${KAFKA_TOPIC}\",\"group_id\":\"${KAFKA_GROUP_ID}\"}"
+    create /kafka-platform/config/connect "{\"bootstrap_servers\":\"${KAFKA_BOOTSTRAP_SERVERS}\",\"mongodb_uri\":\"mongodb://root:mongopass@mongodb.kafka.svc.cluster.local:27017\",\"database\":\"kafka_sink\",\"collection\":\"demo_topic_data\"}"
+    quit
+    EOF
+    echo "[watcher] Znodes initialized (or already exist)."
+
+    # Continuous watch loop — re-registers watches on each change
+    echo "[watcher] Starting watch loop on /kafka-platform/config..."
+
+    while true; do
+      echo "============================================="
+      echo "[watcher] $(date -u '+%Y-%m-%dT%H:%M:%SZ') Registering watches..."
+
+      # Get current values and set watches (-w flag)
+      OUTPUT=$($ZK_CLI -server "$ZK_HOST" 2>&1 <<EOF
+    addauth digest ${ZK_AUTH}
+    get -w /kafka-platform/config/producer
+    get -w /kafka-platform/config/consumer
+    get -w /kafka-platform/config/connect
+    get -w /kafka-platform/config
+    stat -w /kafka-platform/config/producer
+    stat -w /kafka-platform/config/consumer
+    stat -w /kafka-platform/config/connect
+    EOF
+      )
+
+      # Log current config state
+      echo "[watcher] Current producer config:"
+      echo "$OUTPUT" | grep -A1 "config/producer" | head -5 || true
+      echo "[watcher] Current consumer config:"
+      echo "$OUTPUT" | grep -A1 "config/consumer" | head -5 || true
+      echo "[watcher] Current connect config:"
+      echo "$OUTPUT" | grep -A1 "config/connect" | head -5 || true
+
+      # Check for WatchedEvent in output (triggered watch)
+      if echo "$OUTPUT" | grep -q "WatchedEvent"; then
+        echo "[watcher] >>> WATCH TRIGGERED! Config change detected <<<"
+        echo "$OUTPUT" | grep "WatchedEvent"
+      fi
+
+      echo "[watcher] Sleeping 30s before re-registering watches..."
+      sleep 30
+    done
+  update-config.sh: |
+    #!/bin/bash
+    # Utility script: update a config znode to trigger watchers
+    # Usage: update-config.sh <producer|consumer|connect> '<json-value>'
+    ZK_HOST="${ZK_CONNECT:-zookeeper.kafka.svc.cluster.local:2181}"
+    ZK_AUTH="${ZK_CLIENT_USER}:${ZK_CLIENT_PASSWORD}"
+    ZK_CLI="/opt/bitnami/zookeeper/bin/zkCli.sh"
+    ZNODE="/kafka-platform/config/$1"
+    VALUE="$2"
+
+    echo "[update] Setting ${ZNODE} = ${VALUE}"
+    $ZK_CLI -server "$ZK_HOST" <<EOF
+    addauth digest ${ZK_AUTH}
+    set ${ZNODE} "${VALUE}"
+    quit
+    EOF
+    echo "[update] Done. Watchers should fire."
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: zk-config-watcher-secret
+  namespace: kafka
+  labels:
+    app.kubernetes.io/name: zk-config-watcher
+    app.kubernetes.io/part-of: kafka
+    app.kubernetes.io/component: zookeeper
+  annotations:
+    vault-path: secret/kafka/zookeeper
+stringData:
+  ZK_CLIENT_USER: "zkuser"
+  ZK_CLIENT_PASSWORD: "zkpass123"
+  ZK_CONNECT: "zookeeper-0.zookeeper-headless.kafka.svc.cluster.local:2181,zookeeper-1.zookeeper-headless.kafka.svc.cluster.local:2181,zookeeper-2.zookeeper-headless.kafka.svc.cluster.local:2181"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zk-config-watcher
+  namespace: kafka
+  labels:
+    app.kubernetes.io/name: zk-config-watcher
+    app.kubernetes.io/part-of: kafka
+    app.kubernetes.io/component: zookeeper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zk-config-watcher
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zk-config-watcher
+        app.kubernetes.io/part-of: kafka
+        app.kubernetes.io/component: zookeeper
+    spec:
+      containers:
+        - name: watcher
+          image: docker.io/bitnami/zookeeper:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "/scripts/watcher.sh"]
+          envFrom:
+            - secretRef:
+                name: zk-config-watcher-secret
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092"
+            - name: KAFKA_TOPIC
+              value: "demo-topic"
+            - name: PRODUCE_INTERVAL_MS
+              value: "2000"
+            - name: KAFKA_GROUP_ID
+              value: "demo-consumer-group"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: scripts
+          configMap:
+            name: zk-config-watcher-script
+            defaultMode: 0755
