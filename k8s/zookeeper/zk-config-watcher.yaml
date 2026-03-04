@@ -14,13 +14,108 @@ metadata:
     app.kubernetes.io/part-of: kafka
     app.kubernetes.io/component: zookeeper
 data:
-  init-znodes.txt: |
-    create /kafka-platform init
-    create /kafka-platform/config init
-    create /kafka-platform/config/producer bootstrap=demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092,topic=demo-topic,interval_ms=2000
-    create /kafka-platform/config/consumer bootstrap=demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092,topic=demo-topic,group_id=demo-consumer-group
-    create /kafka-platform/config/connect bootstrap=demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092,database=kafka_sink,collection=demo_topic_data
-    quit
+  init-znodes.py: |
+    #!/usr/bin/env python3
+    """Initialize ZooKeeper znodes with Kafka producer/consumer/connect configs."""
+    import os, json, time
+    from kazoo.client import KazooClient
+    from kazoo.exceptions import NodeExistsError
+
+    ZK_HOSTS = os.environ.get("ZK_CONNECT", "zookeeper.kafka.svc.cluster.local:2181")
+
+    # --- Producer config (matches ProducerApp.java) ---
+    PRODUCER_CONFIG = {
+        "bootstrap.servers": "demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092",
+        "topic": "demo-topic",
+        "acks": "all",
+        "retries": 3,
+        "linger.ms": 10,
+        "batch.size": 16384,
+        "buffer.memory": 33554432,
+        "max.block.ms": 60000,
+        "delivery.timeout.ms": 120000,
+        "request.timeout.ms": 30000,
+        "produce.interval.ms": 2000,
+    }
+
+    # --- Consumer config (matches ConsumerApp.java) ---
+    CONSUMER_CONFIG = {
+        "bootstrap.servers": "demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092",
+        "topic": "demo-topic",
+        "group.id": "demo-consumer-group",
+        "auto.offset.reset": "earliest",
+        "enable.auto.commit": True,
+        "auto.commit.interval.ms": 5000,
+        "poll.timeout.ms": 1000,
+        "max.poll.records": 500,
+        "max.poll.interval.ms": 300000,
+        "session.timeout.ms": 45000,
+        "heartbeat.interval.ms": 3000,
+        "fetch.min.bytes": 1,
+        "fetch.max.wait.ms": 500,
+    }
+
+    # --- Connect config (matches KafkaConnect CR) ---
+    CONNECT_CONFIG = {
+        "bootstrap.servers": "demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092",
+        "connector.class": "com.mongodb.kafka.connect.MongoSinkConnector",
+        "topics": "demo-topic",
+        "tasks.max": 1,
+        "connection.uri": "mongodb://root:mongopass@mongodb.kafka.svc.cluster.local:27017",
+        "database": "kafka_sink",
+        "collection": "demo_topic_data",
+        "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+        "value.converter": "org.apache.kafka.connect.storage.StringConverter",
+    }
+
+    def ensure_path(zk, path, data=b""):
+        """Create znode if it doesn't exist, or update if it does."""
+        try:
+            zk.create(path, data, makepath=True)
+            print(f"[init] Created {path}", flush=True)
+        except NodeExistsError:
+            zk.set(path, data)
+            print(f"[init] Updated {path}", flush=True)
+
+    def main():
+        print(f"[init] Connecting to ZooKeeper: {ZK_HOSTS}", flush=True)
+        zk = KazooClient(hosts=ZK_HOSTS)
+        zk.start(timeout=30)
+        print("[init] Connected.", flush=True)
+
+        # Create hierarchy
+        ensure_path(zk, "/kafka-platform", b"kafka-platform-root")
+        ensure_path(zk, "/kafka-platform/config", b"config-root")
+
+        # Store full configs as JSON
+        ensure_path(zk, "/kafka-platform/config/producer",
+                    json.dumps(PRODUCER_CONFIG, indent=2).encode())
+        ensure_path(zk, "/kafka-platform/config/consumer",
+                    json.dumps(CONSUMER_CONFIG, indent=2).encode())
+        ensure_path(zk, "/kafka-platform/config/connect",
+                    json.dumps(CONNECT_CONFIG, indent=2).encode())
+
+        # Also store individual tuning params as sub-znodes for granular watching
+        print("[init] Creating producer tuning znodes...", flush=True)
+        for key, val in PRODUCER_CONFIG.items():
+            ensure_path(zk, f"/kafka-platform/config/producer/{key}",
+                        str(val).encode())
+
+        print("[init] Creating consumer tuning znodes...", flush=True)
+        for key, val in CONSUMER_CONFIG.items():
+            ensure_path(zk, f"/kafka-platform/config/consumer/{key}",
+                        str(val).encode())
+
+        print("[init] Creating connect config znodes...", flush=True)
+        for key, val in CONNECT_CONFIG.items():
+            ensure_path(zk, f"/kafka-platform/config/connect/{key}",
+                        str(val).encode())
+
+        zk.stop()
+        print("[init] All config znodes initialized.", flush=True)
+
+    if __name__ == "__main__":
+        main()
   watcher.py: |
     #!/usr/bin/env python3
     """ZooKeeper Config Watcher — uses kazoo to set persistent watches on config znodes."""
@@ -129,29 +224,19 @@ spec:
     spec:
       initContainers:
         - name: init-znodes
-          image: docker.io/bitnamilegacy/zookeeper:3.9.3
+          image: python:3.12-slim
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
             - -c
             - |
-              ZK_HOST="$ZK_CONNECT"
-              ZK_CLI="/opt/bitnami/zookeeper/bin/zkCli.sh"
-              echo "[init] Waiting for ZooKeeper..."
-              until $ZK_CLI -server "$ZK_HOST" ls / 2>/dev/null | grep -q "\["; do
-                sleep 3
-              done
-              echo "[init] Creating config znodes..."
-              # Create znodes one at a time, ignore errors if they exist
-              $ZK_CLI -server "$ZK_HOST" create /kafka-platform init 2>/dev/null || true
-              $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config init 2>/dev/null || true
-              $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config/producer "bootstrap=demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092,topic=demo-topic,interval_ms=2000" 2>/dev/null || true
-              $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config/consumer "bootstrap=demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092,topic=demo-topic,group_id=demo-consumer-group" 2>/dev/null || true
-              $ZK_CLI -server "$ZK_HOST" create /kafka-platform/config/connect "bootstrap=demo-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092,database=kafka_sink,collection=demo_topic_data" 2>/dev/null || true
-              echo "[init] Znodes ready."
+              pip install --quiet kazoo && python3 /scripts/init-znodes.py
           envFrom:
             - secretRef:
                 name: zk-config-watcher-secret
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
       containers:
         - name: watcher
           image: python:3.12-slim
