@@ -45,7 +45,18 @@
 - [x] Verify data flowing: producers → Kafka → KafkaConnect → MongoDB
 - [x] Install MongoDB Compass for local GUI access
 
-## Phase 6: Verification
+## Phase 6: ZooKeeper Ensemble + Config Watches + Backup
+- [x] Deploy ZooKeeper 3-node ensemble via Bitnami Helm ArgoCD Application (`zookeeper`)
+- [x] Store ZooKeeper credentials in Vault at `secret/kafka/zookeeper`
+- [x] Create config watcher Deployment (Python kazoo, watches `/kafka-platform/config/*` znodes)
+- [x] Store producer/consumer/connect configs as ZK znodes with watch/observer pattern
+- [x] Create snapshot backup CronJob (every 6h) storing ZK data in MongoDB `kafka_sink.zk_snapshots`
+- [x] Create ArgoCD Application for ZK apps (`zookeeper-apps`)
+- [x] Verify all 3 ZK pods Running, watcher active, backup tested
+
+> **Note:** Bitnami Docker images deprecated Aug 2025. Using `bitnamilegacy/zookeeper:3.9.3` with `global.security.allowInsecureImages: true`.
+
+## Phase 7: Verification
 - [x] All Strimzi CRDs installed (10 CRDs)
 - [x] Operator pods: 2 Running (1 leader, 1 follower)
 - [x] Kafka brokers: 3 Running
@@ -55,9 +66,12 @@
 - [x] Consumers: 5 Running
 - [x] KafkaConnect: 1 Running with MongoDB sink connector
 - [x] MongoDB: 1 Running, receiving sinked data
-- [x] ArgoCD shows all 7 apps Synced & Healthy
+- [x] ZooKeeper: 3 Running (ensemble)
+- [x] ZK Config Watcher: 1 Running (kazoo watches)
+- [x] ZK Snapshot Backup: CronJob active (every 6h)
+- [x] ArgoCD shows all 9 apps Synced & Healthy
 
-## ArgoCD Applications Summary (7 total)
+## ArgoCD Applications Summary (9 total)
 | App | Type | Status |
 |-----|------|--------|
 | `strimzi-operator` | Helm (strimzi.io) | Synced & Healthy |
@@ -67,6 +81,8 @@
 | `kafka-connect` | Git (k8s/connect/) | Synced & Healthy |
 | `mongodb` | Helm (bitnami) | Synced & Healthy |
 | `vault-local` | Helm (hashicorp) | Synced & Healthy |
+| `zookeeper` | Helm (bitnami) | Synced & Healthy |
+| `zookeeper-apps` | Git (k8s/zookeeper/) | Synced & Healthy |
 
 ## Vault Secrets
 | Path | Contents |
@@ -76,6 +92,7 @@
 | `secret/kafka/consumer` | Consumer config (bootstrap, topic, group) |
 | `secret/kafka/clients` | Client connection config |
 | `secret/kafka/mongodb` | MongoDB connection URI, credentials |
+| `secret/kafka/zookeeper` | ZK client/admin users, passwords, connect string |
 
 ## Quick Access
 - **ArgoCD UI**: `localhost:5000`
