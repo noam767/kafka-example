@@ -1,0 +1,72 @@
+---
+title: Kafka on Kubernetes Platform — Simplified Architecture
+---
+graph TB
+    %% Styling definitions
+    classDef argocd fill:#f4a261,stroke:#e76f51,color:#000,stroke-width:2px
+    classDef kafka fill:#231F20,stroke:#fff,color:#fff,stroke-width:2px
+    classDef strimzi fill:#1a73e8,stroke:#174ea6,color:#fff,stroke-width:2px
+    classDef app fill:#2d6a4f,stroke:#1b4332,color:#fff,stroke-width:2px
+    classDef mongo fill:#00684A,stroke:#001E2B,color:#fff,stroke-width:2px
+    classDef vault fill:#FFD814,stroke:#000,color:#000,stroke-width:2px
+    classDef zk fill:#8338ec,stroke:#5a189a,color:#fff,stroke-width:2px
+    classDef ui fill:#0077b6,stroke:#023e8a,color:#fff,stroke-width:2px
+
+    %% Subgraphs representing Logical Layers
+    subgraph GitOps["GitOps & Secret Management"]
+        direction LR
+        ARGO["ArgoCD Server<br/>(GitOps Controller)"]:::argocd
+        VAULT["HashiCorp Vault<br/>(HA Cluster)"]:::vault
+    end
+
+    subgraph KafkaPlatform["Kafka Platform (kafka namespace)"]
+        direction TB
+        
+        STRIMZI["Strimzi Cluster Operator"]:::strimzi
+        STRIMZI -.->|"Watches"| KAFKA_CLUSTER
+        
+        subgraph KAFKA_CLUSTER["Kafka Cluster (KRaft Mode)"]
+            direction LR
+            CTRL["Controller NodePool<br/>(3 Replicas)"]:::kafka
+            BROKER["Broker NodePool<br/>(3 Replicas)"]:::kafka
+            ENT_OP["Entity Operator<br/>(Topic/User Mgmt)"]:::kafka
+            CTRL <--> BROKER
+        end
+        
+        BOOTSTRAP["Kafka Bootstrap SVC<br/>(:9092 / :9093 TLS)"]:::kafka
+        BROKER --- BOOTSTRAP
+    end
+
+    subgraph Apps["Kafka Clients & Apps"]
+        direction LR
+        PRODUCER["Kafka Producers<br/>(StatefulSet)"]:::app
+        CONSUMER["Kafka Consumers<br/>(Consumer Group)"]:::app
+        KAFBAT["Kafbat UI"]:::ui
+        
+        PRODUCER --> BOOTSTRAP
+        BOOTSTRAP --> CONSUMER
+        KAFBAT -.-> BOOTSTRAP
+    end
+
+    subgraph Integration["Data Integration"]
+        direction TB
+        CONNECT["Kafka Connect<br/>(MongoSinkConnector plugin)"]:::strimzi
+        MONGO["MongoDB Cluster"]:::mongo
+        
+        STRIMZI -.-> CONNECT
+        BOOTSTRAP --> CONNECT
+        CONNECT --> MONGO
+    end
+
+    subgraph ZookeeperOps["Auxiliary Zookeeper Services"]
+        direction LR
+        ZK["ZooKeeper Ensemble<br/>(App Configs)"]:::zk
+        WATCHER["ZK Config Watcher"]:::zk
+        BACKUP["ZK Backup CronJob"]:::zk
+        NAV["ZooNavigator UI"]:::ui
+        
+        WATCHER --> ZK
+        BACKUP --> ZK
+        BACKUP --> MONGO
+        NAV -.-> ZK
+    end
